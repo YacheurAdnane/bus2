@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bus Lines Management</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.3/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.3/dist/leaflet.js"></script>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        #map {
+            height: 600px;
+            margin-top: 20px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .form-container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .button-container {
+            margin-top: 20px;
+        }
+        select, input, button {
+            margin: 5px;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        button:hover:not(:disabled) {
+            background-color: #0056b3;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        label {
+            font-weight: bold;
+            color: #555;
+        }
+        #stopsList {
+            list-style: none;
+            padding: 0;
+            margin: 10px 0;
+        }
+
+        .stop-item {
+            display: flex;
+            align-items: center;
+            padding: 8px;
+            margin: 5px 0;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+            border: 1px solid #dee2e6;
+        }
+
+        .stop-info {
+            flex-grow: 1;
+            margin-right: 10px;
+        }
+
+        .stop-controls {
+            display: flex;
+            gap: 5px;
+        }
+
+        .stop-controls button {
+            padding: 4px 8px;
+            margin: 0;
+            font-size: 12px;
+        }
+
+        .btn-move {
+            background-color: #6c757d;
+        }
+
+        .btn-move:disabled {
+            background-color: #ced4da;
+            cursor: not-allowed;
+        }
+
+        .btn-delete {
+            background-color: #dc3545;
+        }
+
+        .btn-delete:hover {
+            background-color: #c82333;
+        }
+    </style>
+</head>
+<body>
+    <div class="form-container">
+        <h1>Bus Lines Management</h1>
+        <div class="button-container">
+            <button onclick="location.href='{{ url_for('index') }}'">Return to Index</button>
+        </div>
+    
+       
+        <div>
+            <label for="wilaya">Select Wilaya:</label>
+            <select id="wilaya">
+                <option value="" disabled selected>Select a Wilaya</option>
+                {% for wilaya in wilayas %}
+                    <option value="{{ wilaya }}">{{ wilaya }}</option>
+                {% endfor %}
+                <option value="new">Other (Add New Wilaya)</option>
+            </select>
+            <input type="text" id="newWilayaInput" placeholder="Enter new Wilaya name">
+        </div>
+
+        <div>
+            <button id="loadMap">Load Map</button>
+            <button id="zoomToWilaya">Zoom to Wilaya</button>
+        </div>
+
+        <div style="margin-top: 20px;">
+            <label for="lineName">Add New Line:</label>
+            <input type="text" id="lineName" placeholder="Enter line name">
+    
+            <div class="color-picker-container">
+                <label for="lineColor">Line Color:</label>
+                <input type="color" id="lineColor" value="#3388ff">
+            </div>
+    
+            <button id="addStop">Add Stop</button>
+            <ul id="stopsList"></ul>
+    
+            <button id="saveLine">Save Line</button>
+        </div>
+    </div>
+
+    <div id="map"></div>
+
+    <script>
+        let map;
+        let stops = [];
+        let stopMarkers = [];
+        let selectedStopMarker = null;
+        let routes = [];
+        let lineColor = '#3388ff';
+        let existingStops = [];
+
+        const initMap = () => {
+            map = L.map('map').setView([28.0339, 1.6596], 5);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19,
+                attribution: '© OpenStreetMap contributors'
+            }).addTo(map);
+
+            // Right click to add existing stop
+            map.on('contextmenu', (e) => {
+                const clickedPoint = e.latlng;
+                const nearestStop = findNearestStop(clickedPoint);
+                
+                if (nearestStop && confirm(`Add existing stop "${nearestStop.name}" to the line?`)) {
+                    addExistingStopToLine(nearestStop);
+                }
+            });
+
+            // Left click to add new stop
+            map.on('click', (e) => {
+                const lat = e.latlng.lat.toFixed(6);
+                const lon = e.latlng.lng.toFixed(6);
+                const stopName = prompt('Enter stop name:');
+                if (stopName) {
+                    addNewStop(stopName, lat, lon);
+                }
+            });
+        };
+
+        async function getRoute(from, to) {
+            try {
+                const response = await fetch(`https://router.project-osrm.org/route/v1/driving/${from.lon},${from.lat};${to.lon},${to.lat}?geometries=geojson`);
+                const data = await response.json();
+                
+                if (data.routes && data.routes[0]) {
+                    return data.routes[0].geometry;
+                }
+            } catch (error) {
+                console.error('Error getting route:', error);
+            }
+            return null;
+        }
+
+        async function updateRoutes() {
+            // Clear existing routes
+            routes.forEach(route => map.removeLayer(route));
+            routes = [];
+
+            // Create new routes between consecutive stops
+            for (let i = 0; i < stops.length - 1; i++) {
+                const from = stops[i];
+                const to = stops[i + 1];
+                
+                const geometry = await getRoute(from, to);
+                if (geometry) {
+                    const route = L.geoJSON(geometry, {
+                        style: {
+                            color: lineColor,
+                            weight: 4,
+                            opacity: 0.8
+                        }
+                    }).addTo(map);
+                    routes.push(route);
+                }
+            }
+        }
+
+        function updateStopsList() {
+            const $stopsList = $('#stopsList');
+            $stopsList.empty();
+            
+            stops.forEach((stop, index) => {
+                const $item = $(`
+                    <li class="stop-item">
+                        <div class="stop-info">
+                            ${stop.name} (${stop.lat}, ${stop.lon})
+                        </div>
+                        <div class="stop-controls">
+                            <button class="btn-move" onclick="moveStop(${index}, -1)" ${index === 0 ? 'disabled' : ''}>
+                                ↑
+                            </button>
+                            <button class="btn-move" onclick="moveStop(${index}, 1)" ${index === stops.length - 1 ? 'disabled' : ''}>
+                                ↓
+                            </button>
+                            <button class="btn-delete" onclick="deleteStop(${index})">
+                                ✕
+                            </button>
+                        </div>
+                    </li>
+                `);
+                $stopsList.append($item);
+            });
+        }
+
+        async function moveStop(index, direction) {
+            const newIndex = index + direction;
+            if (newIndex >= 0 && newIndex < stops.length) {
+                // Swap stops in the array
+                [stops[index], stops[newIndex]] = [stops[newIndex], stops[index]];
+                // Swap markers
+                [stopMarkers[index], stopMarkers[newIndex]] = [stopMarkers[newIndex], stopMarkers[index]];
+                
+                updateStopsList();
+                await updateRoutes();
+            }
+        }
+
+        async function deleteStop(index) {
+            if (confirm('Are you sure you want to delete this stop?')) {
+                // Remove marker from map
+                map.removeLayer(stopMarkers[index]);
+                // Remove stop and marker from arrays
+                stops.splice(index, 1);
+                stopMarkers.splice(index, 1);
+                
+                updateStopsList();
+                await updateRoutes();
+            }
+        }
+
+        function findNearestStop(clickedPoint) {
+            let nearest = null;
+            let minDistance = Infinity;
+            
+            existingStops.forEach(stop => {
+                const stopLatLng = L.latLng(parseFloat(stop.lat), parseFloat(stop.lon));
+                const distance = clickedPoint.distanceTo(stopLatLng);
+                
+                if (distance < minDistance) {
+                    minDistance = distance;
+                    nearest = stop;
+                }
+            });
+            // Only return if the stop is within 100 meters
+            if (minDistance <= 100) {
+                return nearest;
+            }
+            return null;
+        }
+
+        async function addExistingStopToLine(stop) {
+            // Check if stop already exists in current line
+            if (stops.some(s => s.name === stop.name)) {
+                alert('This stop is already in the line!');
+                return;
+            }
+
+            const marker = L.marker([stop.lat, stop.lon])
+                .addTo(map)
+                .bindPopup(stop.name);
+            stopMarkers.push(marker);
+            stops.push({ name: stop.name, lat: stop.lat, lon: stop.lon });
+            await updateRoutes();
+            updateStopsList();
+        }
+
+        async function addNewStop(stopName, lat, lon) {
+            // Check if stop name already exists
+            if (stops.some(s => s.name === stopName)) {
+                alert('A stop with this name already exists in the line!');
+                return;
+            }
+
+            if (existingStops.some(s => s.name === stopName)) {
+                alert('A stop with this name already exists in the wilaya!');
+                return;
+            }
+
+            const marker = L.marker([lat, lon])
+                .addTo(map)
+                .bindPopup(stopName);
+            stopMarkers.push(marker);
+            stops.push({ name: stopName, lat, lon });
+            await updateRoutes();
+            updateStopsList();
+        }
+
+        const clearMap = () => {
+            stops = [];
+            stopMarkers.forEach(marker => map.removeLayer(marker));
+            stopMarkers = [];
+            routes.forEach(route => map.removeLayer(route));
+            routes = [];
+            updateStopsList();
+        };
+async function getWilayaCoordinates(wilayaName) {
+    const searchQuery = `${wilayaName} Wilaya, Algeria`;
+    const encodedQuery = encodeURIComponent(searchQuery);
+    const url = `https://nominatim.openstreetmap.org/search?q=${encodedQuery}&format=json&limit=1`;
+
+    try {
+        const response = await fetch(url, {
+            headers: { 'User-Agent': 'BusLineManager/1.0' }
+        });
+        const data = await response.json();
+        if (data && data.length > 0) {
+            return {
+                lat: parseFloat(data[0].lat),
+                lon: parseFloat(data[0].lon),
+                boundingbox: data[0].boundingbox
+            };
+        } else {
+            throw new Error('Location not found');
+        }
+    } catch (error) {
+        console.error('Error fetching coordinates:', error);
+        throw error;
+    }
+}
+
+async function loadExistingStops(wilaya) {
+    try {
+        const response = await $.ajax({
+            url: '/get_wilaya_stops',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({ wilaya: wilaya })
+        });
+        
+        existingStops = response;
+        
+        // Add markers for existing stops with different color
+        existingStops.forEach(stop => {
+            L.circleMarker([stop.lat, stop.lon], {
+                color: '#ff4444',
+                fillColor: '#ff4444',
+                fillOpacity: 0.5,
+                radius: 8
+            }).addTo(map).bindPopup(`Existing stop: ${stop.name}`);
+        });
+    } catch (error) {
+        console.error('Error loading existing stops:', error);
+        alert('Failed to load existing stops');
+    }
+}
+
+async function setWilayaView(wilaya) {
+    try {
+        $('#loadMap').addClass('loading');
+        const coordinates = await getWilayaCoordinates(wilaya);
+        if (coordinates.boundingbox) {
+            const bounds = [
+                [coordinates.boundingbox[0], coordinates.boundingbox[2]],
+                [coordinates.boundingbox[1], coordinates.boundingbox[3]]
+            ];
+            map.fitBounds(bounds);
+        } else {
+            map.setView([coordinates.lat, coordinates.lon], 12);
+        }
+        
+        // Load existing stops after setting view
+        await loadExistingStops(wilaya);
+    } catch (error) {
+        alert('Failed to find location. Using default Algeria view.');
+        map.setView([28.0339, 1.6596], 5);
+    } finally {
+        $('#loadMap').removeClass('loading');
+    }
+}
+
+$(document).ready(() => {
+            initMap();
+
+            $('#wilaya').change(function() {
+                if ($(this).val() === 'new') {
+                    $('#newWilayaInput').show();
+                } else {
+                    $('#newWilayaInput').hide();
+                }
+            });
+
+            $('#lineColor').change(async function() {
+                lineColor = $(this).val();
+                await updateRoutes();
+            });
+
+            $('#loadMap, #zoomToWilaya').click(async () => {
+                const wilaya = $('#wilaya').val() === 'new' ? $('#newWilayaInput').val() : $('#wilaya').val();
+                if (!wilaya) {
+                    alert('Please select or enter a Wilaya.');
+                    return;
+                }
+                await setWilayaView(wilaya);
+            });
+
+            $('#saveLine').click(() => {
+                const wilaya = $('#wilaya').val() === 'new' ? $('#newWilayaInput').val() : $('#wilaya').val();
+                const lineName = $('#lineName').val();
+
+                if (!wilaya || !lineName || stops.length < 2) {
+                    alert('Please fill all fields and add at least two stops.');
+                    return;
+                }
+
+                $.ajax({
+                    url: '/save_line',
+                    method: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify({
+                        wilaya,
+                        line_name: lineName,
+                        stops,
+                        color: lineColor
+                    }),
+                    success: (response) => {
+                        alert(response.message);
+                        clearMap();
+                        $('#lineName').val('');
+                        loadExistingStops(wilaya);
+                    },
+                    error: (err) => {
+                        alert('Error saving line: ' + (err.responseJSON?.message || 'Unknown error'));
+                        console.error('Error details:', err);
+                    }
+                });
+            });
+
+            $('#newWilayaInput').hide();
+        });
+    </script>
+</body>
+</html>

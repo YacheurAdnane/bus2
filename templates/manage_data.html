@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Manage Bus Lines Data</title>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .section {
+            margin-bottom: 30px;
+        }
+        select, button {
+            margin: 5px;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            border: none;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        button.delete {
+            background-color: #dc3545;
+        }
+        button:hover {
+            opacity: 0.8;
+        }
+        h1, h2 {
+            color: #333;
+        }
+        .list-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px;
+            margin: 5px 0;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+        }
+        .stop-list {
+            margin-left: 20px;
+            padding: 10px;
+            background-color: #e9ecef;
+            border-radius: 4px;
+        }
+        .home-button {
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="home-button">
+            <button onclick="location.href='{{ url_for('index') }}'">Return to Home</button>
+        </div>
+        
+        <h1>Manage Bus Lines Data</h1>
+        
+        <div class="section">
+            <h2>Select Wilaya</h2>
+            <select id="wilayaSelect">
+                <option value="" disabled selected>Select a Wilaya</option>
+                {% for wilaya in wilayas %}
+                    <option value="{{ wilaya }}">{{ wilaya }}</option>
+                {% endfor %}
+            </select>
+        </div>
+
+        <div class="section" id="lineSection" style="display: none;">
+            <h2>Manage Lines</h2>
+            <div id="linesList"></div>
+        </div>
+
+        <div class="section" id="stopSection" style="display: none;">
+            <h2>Manage Stops</h2>
+            <div id="stopsList"></div>
+        </div>
+    </div>
+
+    <script>
+        function loadLines(wilaya) {
+            $.get(`/get_lines/${wilaya}`, function(data) {
+                const linesList = $('#linesList');
+                linesList.empty();
+                
+                data.lines.forEach(line => {
+                    const lineDiv = $('<div class="list-item">');
+                    lineDiv.append(`<span>${line.name}</span>`);
+                    
+                    const buttonGroup = $('<div>');
+                    buttonGroup.append(`
+                        <button onclick="viewStops('${line.name}')">View Stops</button>
+                        <button class="delete" onclick="deleteLine('${wilaya}', '${line.name}')">Delete Line</button>
+                    `);
+                    
+                    lineDiv.append(buttonGroup);
+                    linesList.append(lineDiv);
+                });
+                
+                $('#lineSection').show();
+            });
+        }
+
+        function loadStops(wilaya) {
+            $.get(`/get_wilaya_stops`, { wilaya: wilaya }, function(data) {
+                const stopsList = $('#stopsList');
+                stopsList.empty();
+                
+                data.forEach(stop => {
+                    const stopDiv = $('<div class="list-item">');
+                    stopDiv.append(`
+                        <span>${stop.name} (${stop.lat}, ${stop.lon})</span>
+                        <button class="delete" onclick="deleteStop('${wilaya}', '${stop.name}')">Delete Stop</button>
+                    `);
+                    stopsList.append(stopDiv);
+                });
+                
+                $('#stopSection').show();
+            });
+        }
+
+        function viewStops(lineName) {
+            const wilaya = $('#wilayaSelect').val();
+            $.get(`/get_line_stops/${wilaya}/${lineName}`, function(data) {
+                const lineDiv = $(`#linesList div:contains('${lineName}')`).first();
+                let stopList = lineDiv.next('.stop-list');
+                
+                if (stopList.length === 0) {
+                    stopList = $('<div class="stop-list">');
+                    lineDiv.after(stopList);
+                }
+                
+                stopList.empty();
+                data.stops.forEach(stop => {
+                    stopList.append(`
+                        <div class="list-item">
+                            <span>${stop.name}</span>
+                            <button class="delete" onclick="removeStopFromLine('${wilaya}', '${lineName}', '${stop.name}')">
+                                Remove from Line
+                            </button>
+                        </div>
+                    `);
+                });
+            });
+        }
+
+        function deleteLine(wilaya, lineName) {
+            if (confirm(`Are you sure you want to delete the line "${lineName}"?`)) {
+                $.ajax({
+                    url: '/delete_line',
+                    method: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify({ wilaya: wilaya, line_name: lineName }),
+                    success: function(response) {
+                        alert('Line deleted successfully');
+                        loadLines(wilaya);
+                    },
+                    error: function() {
+                        alert('Error deleting line');
+                    }
+                });
+            }
+        }
+
+        function deleteStop(wilaya, stopName) {
+            if (confirm(`Are you sure you want to delete the stop "${stopName}"? This will also remove it from all lines.`)) {
+                $.ajax({
+                    url: '/delete_stop',
+                    method: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify({ wilaya: wilaya, stop_name: stopName }),
+                    success: function(response) {
+                        alert('Stop deleted successfully');
+                        loadStops(wilaya);
+                        loadLines(wilaya);
+                    },
+                    error: function() {
+                        alert('Error deleting stop');
+                    }
+                });
+            }
+        }
+
+        function removeStopFromLine(wilaya, lineName, stopName) {
+            if (confirm(`Are you sure you want to remove the stop "${stopName}" from line "${lineName}"?`)) {
+                $.ajax({
+                    url: '/remove_stop_from_line',
+                    method: 'POST',
+                    contentType: 'application/json',
+                    data: JSON.stringify({ 
+                        wilaya: wilaya, 
+                        line_name: lineName, 
+                        stop_name: stopName 
+                    }),
+                    success: function(response) {
+                        alert('Stop removed from line successfully');
+                        viewStops(lineName);
+                    },
+                    error: function() {
+                        alert('Error removing stop from line');
+                    }
+                });
+            }
+        }
+
+        $(document).ready(function() {
+            $('#wilayaSelect').change(function() {
+                const wilaya = $(this).val();
+                if (wilaya) {
+                    loadLines(wilaya);
+                    loadStops(wilaya);
+                }
+            });
+        });
+    </script>
+</body>
+</html>
