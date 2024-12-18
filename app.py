@@ -68,27 +68,53 @@ def get_wilaya_stops(wilaya):
     
     return jsonify({"stops": stops, "coordinates": coordinates})
 
-@app.route('/lines/<stop_name>')
-def get_stop_lines(stop_name):
-    # Fetch lines containing the specific stop
-    lines = []
-    wilayas_ref = db.collection('wilayas')
-    wilayas_docs = list(wilayas_ref.stream())
-    
-    for wilaya_doc in wilayas_docs:
-        wilaya_lines_ref = wilaya_doc.reference.collection('lines')
+# In app.py, update the get_stop_lines route:
+
+
+
+# Get stop lines route
+@app.route('/lines/<wilaya>/<stop_name>')
+def get_stop_lines(wilaya, stop_name):
+    """
+    Fetch lines containing the specific stop for a specific wilaya
+    """
+    try:
+        lines = []
+        wilaya_ref = db.collection('wilayas').document(wilaya)
+        lines_ref = wilaya_ref.collection('lines')
         
-        for line_doc in wilaya_lines_ref.stream():
+        for line_doc in lines_ref.stream():
             line_data = line_doc.to_dict()
-            stops = line_data.get('stops', [])
+            stops_collection = line_doc.reference.collection('stops')
             
+            # Get all stops for this line
+            stops = []
+            for stop_doc in stops_collection.order_by('order').stream():
+                stop_data = stop_doc.to_dict()
+                stops.append({
+                    'name': stop_data['name'],
+                    'lat': stop_data['lat'],
+                    'lon': stop_data['lon']
+                })
+            
+            # Check if the requested stop is in this line
             if any(stop['name'] == stop_name for stop in stops):
                 lines.append({
                     "name": line_doc.id,
-                    "stops": stops
+                    "stops": stops,
+                    "color": line_data.get('color', '#3388ff')
                 })
+        
+        return jsonify({"lines": lines})
+        
+    except Exception as e:
+        print(f"Error getting stop lines: {str(e)}")
+        return jsonify({
+            "message": f"Error getting stop lines: {str(e)}",
+            "status": "error",
+            "lines": []
+        }), 500
     
-    return jsonify({"lines": lines})
 
 @app.route('/get_wilaya_stops', methods=['POST'])
 def fetch_wilaya_stops():
@@ -105,36 +131,137 @@ def fetch_wilaya_stops():
 
 @app.route('/save_line', methods=['POST'])
 def save_line():
-    data = request.json
-    wilaya = data['wilaya']
-    line_name = data['line_name']
-    stops = data['stops']
-    color = data['color']
+    try:
+        data = request.json
+        wilaya = data['wilaya']
+        line_name = data['line_name']
+        stops = data['stops']
+        color = data['color']
+        route_geometries = data.get('route_geometries', [])
 
-    # Reference to the specific wilaya and its lines
-# Check if the wilaya exists, if not, create it
-    wilaya_ref = db.collection('wilayas').document(wilaya)
-    wilaya_doc = wilaya_ref.get()
-    if not wilaya_doc.exists:
-        # Create the wilaya document
-        wilaya_ref.set({})    
-    lines_ref = wilaya_ref.collection('lines')
-    stops_ref = wilaya_ref.collection('stops')
+        # Create references for the new structure
+        wilaya_ref = db.collection('wilayas').document(wilaya)
+        
+        # Ensure wilaya document exists
+        if not wilaya_ref.get().exists:
+            wilaya_ref.set({})
 
-    # Save or update stops
-    for stop in stops:
-        stops_ref.document(stop['name']).set({
-            'lat': stop['lat'],
-            'lon': stop['lon']
-        }, merge=True)
+        # Save common stops in wilaya/stops collection
+        stops_ref = wilaya_ref.collection('stops')
+        for stop in stops:
+            stop_data = {
+                'lat': str(stop['lat']),
+                'lon': str(stop['lon'])
+            }
+            stops_ref.document(stop['name']).set(stop_data, merge=True)
 
-    # Save the line with its stops
-    lines_ref.document(line_name).set({
-        'stops': stops,
-        'color': color
-    })
+        # Create line document with metadata
+        line_ref = wilaya_ref.collection('lines').document(line_name)
+        line_data = {
+            'color': color,
+            'created_at': firestore.SERVER_TIMESTAMP,
+            'stops_count': len(stops)
+        }
+        line_ref.set(line_data)
 
-    return jsonify({"message": "Line saved successfully!"})
+        # Create stops subcollection for the line
+        stops_collection = line_ref.collection('stops')
+        for i, stop in enumerate(stops):
+            stop_data = {
+                'name': str(stop['name']),
+                'lat': str(stop['lat']),
+                'lon': str(stop['lon']),
+                'order': i
+            }
+            stops_collection.document(str(i)).set(stop_data)
+
+        # Create route subcollection with serialized route data
+        if route_geometries:
+            route_collection = line_ref.collection('route')
+            for i, geometry in enumerate(route_geometries):
+                # Convert the route geometry to a serializable format
+                serialized_coordinates = []
+                for coord in geometry['coordinates']:
+                    # Store each coordinate pair as a string
+                    coord_str = f"{coord[0]},{coord[1]}"
+                    serialized_coordinates.append(coord_str)
+                
+                route_data = {
+                    'type': geometry['type'],
+                    'coordinates': serialized_coordinates,
+                    'order': i
+                }
+                route_collection.document(str(i)).set(route_data)
+
+        return jsonify({
+            "message": "Line saved successfully!",
+            "status": "success",
+            "wilaya": wilaya,
+            "line": line_name
+        })
+
+    except Exception as e:
+        print(f"Error saving line: {str(e)}")
+        return jsonify({
+            "message": f"Error saving line: {str(e)}",
+            "status": "error"
+        }), 500
+
+@app.route('/get_line_stops/<wilaya>/<line_name>')
+def get_line_stops(wilaya, line_name):
+    try:
+        line_ref = db.collection('wilayas').document(wilaya).collection('lines').document(line_name)
+        
+        line_doc = line_ref.get()
+        if not line_doc.exists:
+            return jsonify({"stops": [], "route_geometries": [], "color": '#3388ff'})
+        
+        line_data = line_doc.to_dict()
+        
+        # Get stops
+        stops = []
+        stops_collection = line_ref.collection('stops')
+        for stop_doc in stops_collection.order_by('order').stream():
+            stop_data = stop_doc.to_dict()
+            stops.append({
+                'name': stop_data['name'],
+                'lat': stop_data['lat'],
+                'lon': stop_data['lon']
+            })
+        
+        # Get and deserialize route geometries
+        route_geometries = []
+        route_collection = line_ref.collection('route')
+        for route_doc in route_collection.order_by('order').stream():
+            route_data = route_doc.to_dict()
+            
+            # Deserialize coordinates
+            coordinates = []
+            for coord_str in route_data['coordinates']:
+                lon, lat = map(float, coord_str.split(','))
+                coordinates.append([lon, lat])
+            
+            geometry = {
+                'type': route_data['type'],
+                'coordinates': coordinates
+            }
+            route_geometries.append(geometry)
+        
+        return jsonify({
+            "stops": stops,
+            "route_geometries": route_geometries,
+            "color": line_data.get('color', '#3388ff')
+        })
+        
+    except Exception as e:
+        print(f"Error getting line stops: {str(e)}")
+        return jsonify({
+            "message": f"Error getting line stops: {str(e)}",
+            "status": "error",
+            "stops": [],
+            "route_geometries": [],
+            "color": '#3388ff'
+        }), 500
 
 @app.route('/manage_data')
 def manage_data():
@@ -150,14 +277,6 @@ def get_lines(wilaya):
     lines = [{"name": doc.id} for doc in lines_ref.stream()]
     return jsonify({"lines": lines})
 
-@app.route('/get_line_stops/<wilaya>/<line_name>')
-def get_line_stops(wilaya, line_name):
-    # Fetch stops for a specific line in a wilaya
-    line_ref = db.collection('wilayas').document(wilaya).collection('lines').document(line_name)
-    line_doc = line_ref.get()
-    
-    stops = line_doc.to_dict().get('stops', []) if line_doc.exists else []
-    return jsonify({"stops": stops})
 
 @app.route('/delete_line', methods=['POST'])
 def delete_line():
@@ -165,11 +284,31 @@ def delete_line():
     wilaya = data['wilaya']
     line_name = data['line_name']
     
-    # Delete the line
-    line_ref = db.collection('wilayas').document(wilaya).collection('lines').document(line_name)
-    line_ref.delete()
-    
-    return jsonify({"message": "Line deleted successfully"})
+    try:
+        # Get reference to the line document
+        line_ref = db.collection('wilayas').document(wilaya).collection('lines').document(line_name)
+        
+        # Delete all stops in the line's stops subcollection
+        stops_collection = line_ref.collection('stops')
+        for stop_doc in stops_collection.stream():
+            stop_doc.reference.delete()
+            
+        # Delete all routes in the line's route subcollection
+        route_collection = line_ref.collection('route')
+        for route_doc in route_collection.stream():
+            route_doc.reference.delete()
+            
+        # Finally delete the line document itself
+        line_ref.delete()
+        
+        return jsonify({"message": "Line and all associated data deleted successfully"})
+        
+    except Exception as e:
+        print(f"Error deleting line: {str(e)}")
+        return jsonify({
+            "message": f"Error deleting line: {str(e)}",
+            "status": "error"
+        }), 500
 
 @app.route('/delete_stop', methods=['POST'])
 def delete_stop():
@@ -177,28 +316,55 @@ def delete_stop():
     wilaya = data['wilaya']
     stop_name = data['stop_name']
     
-    # Delete stop from stops collection
-    stop_ref = db.collection('wilayas').document(wilaya).collection('stops').document(stop_name)
-    stop_ref.delete()
-    
-    # Remove stop from all lines
-    lines_ref = db.collection('wilayas').document(wilaya).collection('lines')
-    
-    for line_doc in lines_ref.stream():
-        line_data = line_doc.to_dict()
-        stops = line_data.get('stops', [])
+    try:
+        # Delete stop from wilaya's stops collection
+        stop_ref = db.collection('wilayas').document(wilaya).collection('stops').document(stop_name)
+        stop_ref.delete()
         
-        # Remove stop from line if it exists
-        updated_stops = [stop for stop in stops if stop['name'] != stop_name]
+        # Get all lines in the wilaya
+        lines_ref = db.collection('wilayas').document(wilaya).collection('lines')
+        for line_doc in lines_ref.stream():
+            line_ref = line_doc.reference
+            
+            # Check stops subcollection for the stop to delete
+            stops_collection = line_ref.collection('stops')
+            stops_to_delete = []
+            remaining_stops = []
+            order = 0
+            
+            for stop_doc in stops_collection.order_by('order').stream():
+                stop_data = stop_doc.to_dict()
+                if stop_data['name'] == stop_name:
+                    stops_to_delete.append(stop_doc.reference)
+                else:
+                    # Update order of remaining stops
+                    stop_doc.reference.update({'order': order})
+                    remaining_stops.append(stop_data)
+                    order += 1
+            
+            # Delete the stop documents
+            for stop_ref in stops_to_delete:
+                stop_ref.delete()
+            
+            # Update the line's stops count
+            line_ref.update({'stops_count': len(remaining_stops)})
+            
+            # If no stops remain, delete the entire line
+            if len(remaining_stops) == 0:
+                # Delete route subcollection
+                for route_doc in line_ref.collection('route').stream():
+                    route_doc.reference.delete()
+                # Delete the line document
+                line_ref.delete()
         
-        if updated_stops:
-            # Update line with remaining stops
-            lines_ref.document(line_doc.id).update({'stops': updated_stops})
-        else:
-            # Delete line if no stops remain
-            lines_ref.document(line_doc.id).delete()
-    
-    return jsonify({"message": "Stop deleted successfully"})
+        return jsonify({"message": "Stop deleted successfully from wilaya and all associated lines"})
+        
+    except Exception as e:
+        print(f"Error deleting stop: {str(e)}")
+        return jsonify({
+            "message": f"Error deleting stop: {str(e)}",
+            "status": "error"
+        }), 500
 
 @app.route('/remove_stop_from_line', methods=['POST'])
 def remove_stop_from_line():

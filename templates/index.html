@@ -71,71 +71,60 @@
             background-color: #ffeb3b;
             border: 2px solid #f57c00;
         }
+        .highlighted-stop {
+            background-color: #ffeb3b;
+            font-weight: bold;
+        }
+
+        .highlighted-row {
+            background-color: #f8f9fa;
+        }
     </style>
 </head>
 <body>
-    
     <div class="form-container">
         <h1>Bus Lines Management</h1>
 
+        <!-- Wilaya Selection -->
         <div>
-
             <label for="wilaya">Select Wilaya:</label>
             <select id="wilaya">
                 <option value="" disabled selected>Select a Wilaya</option>
                 {% for wilaya in wilayas %}
                 <option value="{{ wilaya }}">{{ wilaya }}</option>
-                {% endfor %} 
+                {% endfor %}
             </select>
-
             <button id="loadWilaya">Load Wilaya</button>
         </div>
-        <div class="mb-4">
-            <label for="stop-select" class="block font-medium text-gray-700">Select Stop:</label>
-            <select id="stop-select" name="stop" class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-indigo-500 focus:ring-indigo-500 sm:text-sm">
-              <option value="">All Stops</option>
-              {% for wilaya in wilayas %}
-              <option value="{{ wilaya }}" {% if selected_stop == wilaya %}selected{% endif %}>{{ wilaya }}</option>
-              {% endfor %}
-            </select>
-          </div>
-          
-          <table class="w-full table-auto">
-            <thead>
-              <tr>
-                <th class="px-4 py-2">Wilaya</th>
-                <th class="px-4 py-2">Line Name</th>
-                <th class="px-4 py-2">Stops</th>
-                <th class="px-4 py-2">Color</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for line in lines %}
-              <tr>
-                <td class="border px-4 py-2">{{ line.wilaya }}</td>
-                <td class="border px-4 py-2">{{ line.name }}</td>
-                <td class="border px-4 py-2">
-                  {% for stop in line.stops %}
-                  <span class="inline-block bg-gray-200 rounded-full px-3 py-1 text-sm font-semibold text-gray-700 mr-2">{{ stop.name }}</span>
-                  {% endfor %}
-                </td>
-                <td class="border px-4 py-2">
-                  <div class="w-8 h-8 rounded-full" style="background-color: {{ line.color }}"></div>
-                </td>
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
+
+        <!-- Stop/Line Selection -->
         <div style="margin-top: 15px;">
-            <label for="stop">Select Stop:</label>
-            <select id="stop" disabled>
-                <option value="" disabled selected>Select a Stop</option>
-            </select>
+            <div>
+                <label><input type="radio" name="searchType" value="stop" checked> Search by Stop</label>
+                <label><input type="radio" name="searchType" value="line"> Search by Line</label>
+            </div>
 
-            <input type="text" id="stopInput" placeholder="Or enter stop name manually">
+            <!-- Stop Selection (initially visible) -->
+            <div id="stopSelection">
+                <label for="stop">Select Stop:</label>
+                <select id="stop" disabled>
+                    <option value="" disabled selected>Select a Stop</option>
+                </select>
+                <button id="viewStop" disabled>View Lines for Stop</button>
+            </div>
 
-            <button id="viewLine" disabled>View Line</button>
+            <!-- Line Selection (initially hidden) -->
+            <div id="lineSelection" style="display: none;">
+                <label for="line">Select Line:</label>
+                <select id="line" disabled>
+                    <option value="" disabled selected>Select a Line</option>
+                </select>
+                <button id="viewLine" disabled>View Line Stops</button>
+            </div>
         </div>
+
+        <!-- Results Table -->
+        <div id="resultsTable" style="margin-top: 20px;"></div>
     </div>
 
     <div class="button-container">
@@ -149,7 +138,45 @@
         let map;
         let currentMarkers = [];
         let currentRoutes = [];
-        let selectedStop = null;
+        async function getRoute(start, end) {
+    try {
+        const waypoint1 = L.latLng(start.lat, start.lon);
+        const waypoint2 = L.latLng(end.lat, end.lon);
+        
+        // Remove any existing route between these points first
+        currentRoutes = currentRoutes.filter(route => {
+            const waypoints = route.getWaypoints();
+            if (waypoints[0].latLng.equals(waypoint1) && waypoints[1].latLng.equals(waypoint2)) {
+                map.removeControl(route);
+                return false;
+            }
+            return true;
+        });
+        
+        const control = L.Routing.control({
+            waypoints: [waypoint1, waypoint2],
+            show: false,
+            addWaypoints: false,
+            routeWhileDragging: false,
+            lineOptions: {
+                styles: [{color: '#3388ff', opacity: 0.6, weight: 4}]
+            },
+            createMarker: function() { return null; }  // Prevent creation of default markers
+        });
+        
+        control.addTo(map);
+        currentRoutes.push(control);
+        
+        // Wait for route calculation to complete
+        await new Promise((resolve) => {
+            control.on('routesfound', () => {
+                resolve();
+            });
+        });
+    } catch (err) {
+        console.error('Error getting route:', err);
+    }
+}
 
         function initMap() {
             map = L.map('map').setView([28.0339, 1.6596], 5);
@@ -160,143 +187,336 @@
         }
 
         function clearMap() {
-            currentMarkers.forEach(marker => map.removeLayer(marker));
-            currentRoutes.forEach(route => map.removeLayer(route));
-            currentMarkers = [];
-            currentRoutes = [];
+    // Remove all existing markers
+    currentMarkers.forEach(marker => map.removeLayer(marker));
+    currentMarkers = [];
+
+    // Remove all existing routes
+    currentRoutes.forEach(route => map.removeLayer(route));
+    currentRoutes = [];
+}
+
+function createStopMarker(stop, isHighlighted = false) {
+    const marker = L.marker([stop.lat, stop.lon], {
+        icon: L.divIcon({
+            className: 'stop-marker',
+            iconSize: null,  // Remove default icon size
+            iconAnchor: [25, 25],  // Center the marker
+            html: `
+                <div style="
+                    background-color: white;
+                    padding: 5px 10px;
+                    border-radius: 15px;
+                    border: 2px solid #3388ff;
+                    white-space: nowrap;
+                    text-align: center;
+                    transform: translate(-50%, -50%);
+                    ${isHighlighted ? 'background-color: #ffeb3b; border-color: #f57c00;' : ''}
+                ">
+                    ${stop.name}
+                </div>`
+        }),
+        interactive: true
+    });
+    return marker;
+}
+
+        async function loadStops(wilaya) {
+    try {
+        const response = await $.ajax({
+            url: `/stops/${wilaya}`,
+            method: 'GET'
+        });
+        
+        // Clear and populate stops dropdown
+        $('#stop').empty().append('<option value="" disabled selected>Select a Stop</option>');
+        response.stops.forEach(stop => {
+            $('#stop').append(`<option value="${stop.name}">${stop.name}</option>`);
+        });
+        $('#stop').prop('disabled', false);
+        
+        // Center map on wilaya
+        if (response.coordinates) {
+            map.setView([response.coordinates.lat, response.coordinates.lon], 12);
+        }
+    } catch (err) {
+        console.error('Error loading stops:', err);
+        alert('Failed to load stops.');
+    }
+}
+async function loadLines(wilaya) {
+    try {
+        const response = await $.ajax({
+            url: `/get_lines/${wilaya}`,
+            method: 'GET'
+        });
+        
+        $('#line').empty().append('<option value="" disabled selected>Select a Line</option>');
+        response.lines.forEach(line => {
+            $('#line').append(`<option value="${line.name}">${line.name}</option>`);
+        });
+        $('#line').prop('disabled', false);
+    } catch (err) {
+        console.error('Error loading lines:', err);
+        alert('Failed to load lines.');
+    }
+}
+
+function highlightStopInTable(stopName) {
+    $('.table-row').removeClass('highlighted-row');
+    $(`.table-row[data-stop="${stopName}"]`).addClass('highlighted-row');
+}
+function displayLinesForStop(lines, selectedStop) {
+    if (lines.length === 0) {
+        $('#resultsTable').html('<p>No lines found for this stop.</p>');
+        return;
+    }
+
+    let tableHtml = `
+        <table style="width: 100%; border-collapse: collapse; margin-top: 20px;">
+            <thead>
+                <tr style="background-color: #f8f9fa;">
+                    <th style="padding: 12px; border: 1px solid #dee2e6;">Line Name</th>
+                    <th style="padding: 12px; border: 1px solid #dee2e6;">Stops</th>
+                </tr>
+            </thead>
+            <tbody>
+    `;
+
+    lines.forEach(line => {
+        const stopsHtml = line.stops.map(stop => {
+            const isSelected = stop.name === selectedStop;
+            return `<span class="${isSelected ? 'highlighted-stop' : ''}" style="${isSelected ? 'background-color: #ffeb3b; padding: 2px 5px; border-radius: 3px;' : ''}">${stop.name}</span>`;
+        }).join(' → ');
+
+        tableHtml += `
+            <tr>
+                <td style="padding: 12px; border: 1px solid #dee2e6;">${line.name}</td>
+                <td style="padding: 12px; border: 1px solid #dee2e6;">${stopsHtml}</td>
+            </tr>
+        `;
+    });
+
+    tableHtml += '</tbody></table>';
+    $('#resultsTable').html(tableHtml);
+}
+
+
+function showStopOnMap(stop) {
+    clearMap();
+    const marker = L.marker([stop.lat, stop.lon], {
+        icon: L.divIcon({
+            className: 'stop-marker highlighted-stop',
+            html: `<div style="background-color: #ffeb3b; padding: 5px; border-radius: 50%; border: 2px solid #f57c00;">${stop.name}</div>`
+        })
+    });
+    marker.addTo(map);
+    currentMarkers.push(marker);
+    map.setView([stop.lat, stop.lon], 15);
+}
+
+// Update the viewStop click handler
+$('#viewStop').click(async function() {
+    clearMap();
+    const stopName = $('#stop').val();
+    const wilaya = $('#wilaya').val();
+
+    if (!stopName) {
+        alert('Please select a stop.');
+        return;
+    }
+
+    try {
+        // Get the stop details to show on the map
+        const stopsResponse = await $.ajax({
+            url: `/stops/${wilaya}`,
+            method: 'GET'
+        });
+
+        const selectedStop = stopsResponse.stops.find(stop => stop.name === stopName);
+        if (selectedStop) {
+            showStopOnMap(selectedStop);
         }
 
-        function createStopMarker(stop) {
+        // Get and display the lines
+        const linesResponse = await $.ajax({
+            url: `/lines/${wilaya}/${stopName}`,
+            method: 'GET'
+        });
+
+        displayLinesForStop(linesResponse.lines, stopName);
+    } catch (err) {
+        console.error('Error:', err);
+        alert('Failed to load stop information.');
+    }
+});
+
+async function showLineStops(wilaya, lineName) {
+    try {
+        const response = await $.ajax({
+            url: `/get_line_stops/${wilaya}/${lineName}`,
+            method: 'GET'
+        });
+
+        clearMap();
+
+        const stops = response.stops;
+        const routeGeometries = response.route_geometries;
+        const lineColor = response.color;
+        const bounds = [];
+        
+        // Create markers for all stops
+        stops.forEach((stop, index) => {
+            const isFirst = index === 0;
+            const isLast = index === stops.length - 1;
+            const borderColor = isFirst ? '#4CAF50' : isLast ? '#f44336' : '#3388ff';
+            
             const marker = L.marker([stop.lat, stop.lon], {
                 icon: L.divIcon({
                     className: 'stop-marker',
-                    html: `<div style="background-color: white; padding: 5px; border-radius: 50%; border: 2px solid #3388ff;">${stop.name}</div>`
-                })
+                    iconSize: null,
+                    iconAnchor: [25, 25],
+                    html: `
+                        <div style="
+                            background-color: white;
+                            padding: 5px 10px;
+                            border-radius: 15px;
+                            border: 2px solid ${borderColor};
+                            white-space: nowrap;
+                            text-align: center;
+                            transform: translate(-50%, -50%);
+                        ">
+                            ${stop.name}
+                            ${isFirst ? '<div style="font-size: 0.8em; color: #4CAF50">Start</div>' : 
+                              isLast ? '<div style="font-size: 0.8em; color: #f44336">End</div>' : ''}
+                        </div>`
+                }),
+                interactive: true
             });
-
-            marker.on('click', () => {
-                if (selectedStop) {
-                    selectedStop.getElement().classList.remove('selected-stop');
-                }
-                selectedStop = marker;
-                marker.getElement().classList.add('selected-stop');
-                $('#stop').val(stop.name);
-                loadLines(stop.name);
-            });
-
-            return marker;
-        }
-
-        async function getRoute(from, to, color) {
-            const response = await fetch(`https://router.project-osrm.org/route/v1/driving/${from.lon},${from.lat};${to.lon},${to.lat}?geometries=geojson`);
-            const data = await response.json();
             
-            if (data.routes && data.routes[0]) {
-                const route = L.geoJSON(data.routes[0].geometry, {
-                    style: {
-                        color: color,
-                        weight: 4,
-                        opacity: 0.8
-                    }
-                }).addTo(map);
-                currentRoutes.push(route);
-            }
-        }
+            marker.addTo(map);
+            currentMarkers.push(marker);
+            bounds.push([stop.lat, stop.lon]);
+        });
 
-        function loadStops(wilaya) {
-            $.ajax({
-                url: `/stops/${wilaya}`,
-                method: 'GET',
-                success: function(response) {
-                    clearMap();
-                    $('#stop').empty().append('<option value="" disabled selected>Select a Stop</option>');
-                    
-                    response.stops.forEach(stop => {
-                        $('#stop').append(`<option value="${stop.name}">${stop.name}</option>`);
-                        const marker = createStopMarker(stop);
-                        marker.addTo(map);
-                        currentMarkers.push(marker);
-                    });
-                    
-                    map.setView([response.coordinates.lat, response.coordinates.lon], 12);
-                    $('#stop').prop('disabled', false);
-                },
-                error: function(err) {
-                    console.error('Error loading stops:', err);
-                    alert('Failed to load stops.');
+        // Draw saved routes with the line's color
+        routeGeometries.forEach(geometry => {
+            const route = L.geoJSON(geometry, {
+                style: {
+                    color: lineColor,
+                    weight: 4,
+                    opacity: 0.8
                 }
-            });
+            }).addTo(map);
+            currentRoutes.push(route);
+        });
+
+        // Fit map to show all stops
+        if (bounds.length > 0) {
+            map.fitBounds(L.latLngBounds(bounds), { padding: [50, 50] });
         }
 
-        async function loadLines(stopName) {
-            try {
-                const response = await $.ajax({
-                    url: `/lines/${stopName}`,
-                    method: 'GET'
-                });
+        // Display stops in table format
+        let tableHtml = `
+            <table style="width: 100%; border-collapse: collapse; margin-top: 20px;">
+                <thead>
+                    <tr>
+                        <th style="padding: 12px; border: 1px solid #dee2e6;">Line Name</th>
+                        <th style="padding: 12px; border: 1px solid #dee2e6;">Stops</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td style="padding: 12px; border: 1px solid #dee2e6;">${lineName}</td>
+                        <td style="padding: 12px; border: 1px solid #dee2e6;">${stops.map(stop => stop.name).join(' → ')}</td>
+                    </tr>
+                </tbody>
+            </table>
+        `;
+        
+        $('#resultsTable').html(tableHtml);
 
-                currentRoutes.forEach(route => map.removeLayer(route));
-                currentRoutes = [];
-
-                for (const line of response.lines) {
-                    const color = line.stops[0].color;
-                    
-                    // Create routes between consecutive stops
-                    for (let i = 0; i < line.stops.length - 1; i++) {
-                        await getRoute(line.stops[i], line.stops[i + 1], color);
-                    }
-
-                    // Fit map to show all markers
-                    const bounds = L.latLngBounds(line.stops.map(s => [parseFloat(s.lat), parseFloat(s.lon)]));
-                    map.fitBounds(bounds, { padding: [50, 50] });
-                }
-            } catch (err) {
-                console.error('Error loading lines:', err);
-                alert('Failed to load lines.');
-            }
-        }
-
+    } catch (err) {
+        console.error('Error loading line stops:', err);
+        alert('Failed to load line stops.');
+    }
+}
         $(document).ready(function() {
             initMap();
 
+            // Toggle between stop and line selection
+            $('input[name="searchType"]').change(function() {
+                const searchType = $(this).val();
+                if (searchType === 'stop') {
+                    $('#stopSelection').show();
+                    $('#lineSelection').hide();
+                } else {
+                    $('#stopSelection').hide();
+                    $('#lineSelection').show();
+                }
+            });
+
             $('#loadWilaya').click(function() {
-                const wilaya = $('#wilaya').val();
-                if (!wilaya) {
-                    alert('Please select a Wilaya.');
+        const wilaya = $('#wilaya').val();
+        if (!wilaya) {
+            alert('Please select a Wilaya.');
+            return;
+        }
+        loadStops(wilaya);
+        loadLines(wilaya);
+    });
+
+   
+
+            $('#viewStop').click(function() {
+                clearMap();
+                const stopName = $('#stop').val();
+                if (!stopName) {
+                    alert('Please select a stop.');
                     return;
                 }
-                loadStops(wilaya);
+                $.ajax({
+                    url: `/lines/${stopName}`,
+                    method: 'GET',
+                    success: function(response) {
+                        displayLinesForStop(response.lines);
+                    },
+                    error: function(err) {
+                        console.error('Error:', err);
+                        //alert('Failed to load lines for stop.');
+                    }
+                });
             });
 
             $('#viewLine').click(function() {
-                const stopName = $('#stop').val() || $('#stopInput').val();
-                if (!stopName) {
-                    alert('Please select or enter a Stop name.');
-                    return;
-                }
-                loadLines(stopName);
-            });
+                clearMap();
+        const wilaya = $('#wilaya').val();
+        const lineName = $('#line').val();
+        if (!lineName) {
+            alert('Please select a line.');
+            return;
+        }
+        showLineStops(wilaya, lineName);
+    });
+
             $('#stop').change(function() {
-                $('#viewLine').prop('disabled', false);
-                $('#stopInput').val('');
+                $('#viewStop').prop('disabled', !$(this).val());
             });
 
-            $('#stopInput').on('input', function() {
-                $('#viewLine').prop('disabled', !$(this).val().trim());
-                $('#stop').val('');
+            $('#line').change(function() {
+                $('#viewLine').prop('disabled', !$(this).val());
             });
 
             $('#wilaya').change(function() {
+                clearMap();
                 $('#stop').prop('disabled', true);
-                $('#stop').val('');
-                $('#stopInput').val('');
+                $('#line').prop('disabled', true);
+                $('#viewStop').prop('disabled', true);
                 $('#viewLine').prop('disabled', true);
+                $('#resultsTable').empty();
                 clearMap();
             });
         });
-        document.getElementById('stop-select').addEventListener('change', function() {
-    window.location.href = '/?stop=' + this.value;
-  });
     </script>
 </body>
 </html>

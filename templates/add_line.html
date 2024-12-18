@@ -155,6 +155,7 @@
         let map;
         let stops = [];
         let stopMarkers = [];
+        let currentstops = [];
         let selectedStopMarker = null;
         let routes = [];
         let lineColor = '#3388ff';
@@ -339,6 +340,8 @@
         const clearMap = () => {
             stops = [];
             stopMarkers.forEach(marker => map.removeLayer(marker));
+            currentstops.forEach(stop => map.removeLayer(stop));
+            currentstops = [];
             stopMarkers = [];
             routes.forEach(route => map.removeLayer(route));
             routes = [];
@@ -380,7 +383,11 @@ async function loadExistingStops(wilaya) {
         
         existingStops = response;
         
+        
         // Add markers for existing stops with different color
+        
+        existingStops.forEach(stop => currentstops.push(stop));
+
         existingStops.forEach(stop => {
             L.circleMarker([stop.lat, stop.lon], {
                 color: '#ff4444',
@@ -397,6 +404,7 @@ async function loadExistingStops(wilaya) {
 
 async function setWilayaView(wilaya) {
     try {
+        clearMap();
         $('#loadMap').addClass('loading');
         const coordinates = await getWilayaCoordinates(wilaya);
         if (coordinates.boundingbox) {
@@ -423,6 +431,7 @@ $(document).ready(() => {
             initMap();
 
             $('#wilaya').change(function() {
+                
                 if ($(this).val() === 'new') {
                     $('#newWilayaInput').show();
                 } else {
@@ -436,6 +445,7 @@ $(document).ready(() => {
             });
 
             $('#loadMap, #zoomToWilaya').click(async () => {
+                clearMap();
                 const wilaya = $('#wilaya').val() === 'new' ? $('#newWilayaInput').val() : $('#wilaya').val();
                 if (!wilaya) {
                     alert('Please select or enter a Wilaya.');
@@ -444,37 +454,57 @@ $(document).ready(() => {
                 await setWilayaView(wilaya);
             });
 
-            $('#saveLine').click(() => {
-                const wilaya = $('#wilaya').val() === 'new' ? $('#newWilayaInput').val() : $('#wilaya').val();
-                const lineName = $('#lineName').val();
+            // Add this to the saveLine click handler in add_line.html
+$('#saveLine').click(async () => {
+    const wilaya = $('#wilaya').val() === 'new' ? $('#newWilayaInput').val() : $('#wilaya').val();
+    const lineName = $('#lineName').val();
 
-                if (!wilaya || !lineName || stops.length < 2) {
-                    alert('Please fill all fields and add at least two stops.');
-                    return;
-                }
+    if (!wilaya || !lineName || stops.length < 2) {
+        alert('Please fill all fields and add at least two stops.');
+        return;
+    }
 
-                $.ajax({
-                    url: '/save_line',
-                    method: 'POST',
-                    contentType: 'application/json',
-                    data: JSON.stringify({
-                        wilaya,
-                        line_name: lineName,
-                        stops,
-                        color: lineColor
-                    }),
-                    success: (response) => {
-                        alert(response.message);
-                        clearMap();
-                        $('#lineName').val('');
-                        loadExistingStops(wilaya);
-                    },
-                    error: (err) => {
-                        alert('Error saving line: ' + (err.responseJSON?.message || 'Unknown error'));
-                        console.error('Error details:', err);
-                    }
-                });
-            });
+    // Collect all route geometries
+    const routeGeometries = [];
+    for (let i = 0; i < stops.length - 1; i++) {
+        try {
+            const from = stops[i];
+            const to = stops[i + 1];
+            const response = await fetch(
+                `https://router.project-osrm.org/route/v1/driving/${from.lon},${from.lat};${to.lon},${to.lat}?geometries=geojson`
+            );
+            const data = await response.json();
+            if (data.routes && data.routes[0]) {
+                routeGeometries.push(data.routes[0].geometry);
+            }
+        } catch (error) {
+            console.error('Error getting route geometry:', error);
+        }
+    }
+
+    $.ajax({
+        url: '/save_line',
+        method: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({
+            wilaya,
+            line_name: lineName,
+            stops,
+            color: lineColor,
+            route_geometries: routeGeometries
+        }),
+        success: (response) => {
+            alert(response.message);
+            clearMap();
+            $('#lineName').val('');
+            loadExistingStops(wilaya);
+        },
+        error: (err) => {
+            alert('Error saving line: ' + (err.responseJSON?.message || 'Unknown error'));
+            console.error('Error details:', err);
+        }
+    });
+});
 
             $('#newWilayaInput').hide();
         });

@@ -18,15 +18,46 @@
             border-radius: 8px;
             margin-bottom: 20px;
             box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            max-width: 1200px;
+            margin: 0 auto;
         }
         .section {
             margin-bottom: 30px;
+            padding: 20px;
+            background-color: #ffffff;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .management-options {
+            display: flex;
+            gap: 10px;
+            margin: 20px 0;
+        }
+        .option-button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            transition: all 0.3s ease;
+        }
+        .option-button.active {
+            background-color: #007bff;
+            color: white;
+        }
+        .option-button:not(.active) {
+            background-color: #e9ecef;
+            color: #495057;
         }
         select, button {
             margin: 5px;
-            padding: 8px;
+            padding: 8px 16px;
             border: 1px solid #ddd;
             border-radius: 4px;
+            font-size: 14px;
+        }
+        select {
+            min-width: 200px;
         }
         button {
             background-color: #007bff;
@@ -41,26 +72,62 @@
         button:hover {
             opacity: 0.8;
         }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
         h1, h2 {
             color: #333;
+            margin-bottom: 20px;
         }
         .list-item {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            padding: 10px;
-            margin: 5px 0;
+            padding: 15px;
+            margin: 10px 0;
             background-color: #f8f9fa;
             border-radius: 4px;
+            transition: background-color 0.3s;
+        }
+        .list-item:hover {
+            background-color: #e9ecef;
         }
         .stop-list {
-            margin-left: 20px;
+            margin-left: 40px;
             padding: 10px;
             background-color: #e9ecef;
             border-radius: 4px;
+            margin-top: 5px;
         }
         .home-button {
             margin-bottom: 20px;
+        }
+        .content-section {
+            display: none;
+        }
+        .content-section.active {
+            display: block;
+        }
+        .button-group {
+            display: flex;
+            gap: 5px;
+        }
+        .status-message {
+            padding: 10px;
+            margin: 10px 0;
+            border-radius: 4px;
+            display: none;
+        }
+        .status-message.success {
+            background-color: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+        .status-message.error {
+            background-color: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
         }
     </style>
 </head>
@@ -82,28 +149,50 @@
             </select>
         </div>
 
-        <div class="section" id="lineSection" style="display: none;">
+        <div class="management-options">
+            <button class="option-button active" data-section="lineSection">Manage Lines</button>
+            <button class="option-button" data-section="stopSection">Manage Stops</button>
+        </div>
+
+        <div id="statusMessage" class="status-message"></div>
+
+        <div id="lineSection" class="content-section active">
             <h2>Manage Lines</h2>
             <div id="linesList"></div>
         </div>
 
-        <div class="section" id="stopSection" style="display: none;">
+        <div id="stopSection" class="content-section">
             <h2>Manage Stops</h2>
             <div id="stopsList"></div>
         </div>
     </div>
 
     <script>
+        function showStatus(message, type) {
+            const statusDiv = $('#statusMessage');
+            statusDiv.text(message)
+                .removeClass('success error')
+                .addClass(type)
+                .fadeIn()
+                .delay(3000)
+                .fadeOut();
+        }
+
         function loadLines(wilaya) {
             $.get(`/get_lines/${wilaya}`, function(data) {
                 const linesList = $('#linesList');
                 linesList.empty();
                 
+                if (data.lines.length === 0) {
+                    linesList.append('<p>No lines found for this wilaya.</p>');
+                    return;
+                }
+                
                 data.lines.forEach(line => {
                     const lineDiv = $('<div class="list-item">');
                     lineDiv.append(`<span>${line.name}</span>`);
                     
-                    const buttonGroup = $('<div>');
+                    const buttonGroup = $('<div class="button-group">');
                     buttonGroup.append(`
                         <button onclick="viewStops('${line.name}')">View Stops</button>
                         <button class="delete" onclick="deleteLine('${wilaya}', '${line.name}')">Delete Line</button>
@@ -112,26 +201,37 @@
                     lineDiv.append(buttonGroup);
                     linesList.append(lineDiv);
                 });
-                
-                $('#lineSection').show();
             });
         }
 
         function loadStops(wilaya) {
-            $.get(`/get_wilaya_stops`, { wilaya: wilaya }, function(data) {
-                const stopsList = $('#stopsList');
-                stopsList.empty();
-                
-                data.forEach(stop => {
-                    const stopDiv = $('<div class="list-item">');
-                    stopDiv.append(`
-                        <span>${stop.name} (${stop.lat}, ${stop.lon})</span>
-                        <button class="delete" onclick="deleteStop('${wilaya}', '${stop.name}')">Delete Stop</button>
-                    `);
-                    stopsList.append(stopDiv);
-                });
-                
-                $('#stopSection').show();
+            $.ajax({
+                url: '/get_wilaya_stops',
+                method: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({ wilaya: wilaya }),
+                success: function(data) {
+                    const stopsList = $('#stopsList');
+                    stopsList.empty();
+                    
+                    if (data.length === 0) {
+                        stopsList.append('<p>No stops found for this wilaya.</p>');
+                        return;
+                    }
+                    
+                    data.forEach(stop => {
+                        const stopDiv = $('<div class="list-item">');
+                        stopDiv.append(`
+                            <span>${stop.name} (${stop.lat}, ${stop.lon})</span>
+                            <div class="button-group">
+                                <button class="delete" onclick="deleteStop('${wilaya}', '${stop.name}')">
+                                    Delete Stop
+                                </button>
+                            </div>
+                        `);
+                        stopsList.append(stopDiv);
+                    });
+                }
             });
         }
 
@@ -147,16 +247,20 @@
                 }
                 
                 stopList.empty();
-                data.stops.forEach(stop => {
-                    stopList.append(`
-                        <div class="list-item">
-                            <span>${stop.name}</span>
-                            <button class="delete" onclick="removeStopFromLine('${wilaya}', '${lineName}', '${stop.name}')">
-                                Remove from Line
-                            </button>
-                        </div>
-                    `);
-                });
+                if (data.stops && data.stops.length > 0) {
+                    data.stops.forEach(stop => {
+                        stopList.append(`
+                            <div class="list-item">
+                                <span>${stop.name}</span>
+                                <button class="delete" onclick="removeStopFromLine('${wilaya}', '${lineName}', '${stop.name}')">
+                                    Remove from Line
+                                </button>
+                            </div>
+                        `);
+                    });
+                } else {
+                    stopList.append('<p>No stops found for this line.</p>');
+                }
             });
         }
 
@@ -168,30 +272,30 @@
                     contentType: 'application/json',
                     data: JSON.stringify({ wilaya: wilaya, line_name: lineName }),
                     success: function(response) {
-                        alert('Line deleted successfully');
+                        showStatus('Line deleted successfully', 'success');
                         loadLines(wilaya);
                     },
                     error: function() {
-                        alert('Error deleting line');
+                        showStatus('Error deleting line', 'error');
                     }
                 });
             }
         }
 
         function deleteStop(wilaya, stopName) {
-            if (confirm(`Are you sure you want to delete the stop "${stopName}"? This will also remove it from all lines.`)) {
+            if (confirm(`Are you sure you want to delete the stop "${stopName}"?\nThis will also remove it from all lines that use this stop.`)) {
                 $.ajax({
                     url: '/delete_stop',
                     method: 'POST',
                     contentType: 'application/json',
                     data: JSON.stringify({ wilaya: wilaya, stop_name: stopName }),
                     success: function(response) {
-                        alert('Stop deleted successfully');
+                        showStatus('Stop deleted successfully', 'success');
                         loadStops(wilaya);
                         loadLines(wilaya);
                     },
                     error: function() {
-                        alert('Error deleting stop');
+                        showStatus('Error deleting stop', 'error');
                     }
                 });
             }
@@ -209,11 +313,11 @@
                         stop_name: stopName 
                     }),
                     success: function(response) {
-                        alert('Stop removed from line successfully');
+                        showStatus('Stop removed from line successfully', 'success');
                         viewStops(lineName);
                     },
                     error: function() {
-                        alert('Error removing stop from line');
+                        showStatus('Error removing stop from line', 'error');
                     }
                 });
             }
@@ -225,7 +329,17 @@
                 if (wilaya) {
                     loadLines(wilaya);
                     loadStops(wilaya);
+                    $('.content-section').first().addClass('active');
                 }
+            });
+
+            $('.option-button').click(function() {
+                $('.option-button').removeClass('active');
+                $(this).addClass('active');
+                
+                const targetSection = $(this).data('section');
+                $('.content-section').removeClass('active');
+                $(`#${targetSection}`).addClass('active');
             });
         });
     </script>
